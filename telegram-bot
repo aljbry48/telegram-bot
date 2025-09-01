@@ -1,0 +1,175 @@
+#© Mikey - All rights reserved.
+#Telegram: @SSUU_R
+
+import os
+import asyncio
+from pyrogram import Client, filters
+import pyromod.listen   # ✅ هذا السطر ضروري لتفعيل .listen
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.errors import (
+    PhoneCodeInvalid,
+    PhoneNumberInvalid,
+    PhoneCodeExpired,
+    SessionPasswordNeeded,
+    PasswordHashInvalid,
+    UsernameInvalid
+)
+
+# ضع بياناتك هنا
+apid = 123456            # api_id من my.telegram.org
+hash = "your_api_hash"   # api_hash من my.telegram.org
+bot_token = "your_bot_token"   # توكن البوت من BotFather
+
+bot = Client("bots", api_id=apid, api_hash=hash, bot_token=bot_token)
+
+accounts_folder = "accounts"
+if not os.path.exists(accounts_folder):
+    os.makedirs(accounts_folder)
+
+# أمر البداية
+@bot.on_message(filters.command(["start"]))
+async def start(bot, msg):
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("إضافة حساب", callback_data="add"),
+         InlineKeyboardButton("عرض الحسابات", callback_data="show")],
+        [InlineKeyboardButton("حذف الحساب", callback_data="delet"),
+         InlineKeyboardButton("جلب كود", callback_data="LastCode")],
+        [InlineKeyboardButton("التحكم بالحسابات", callback_data="Control")]
+    ])
+    await msg.reply_text(
+        "مرحبًا بك في بوت تخزين حسابات تيليجرام والتحكم بها!\n\n"
+        "اختر من الأزرار أدناه:", 
+        reply_markup=keyboard
+    )
+
+# عرض الحسابات
+async def show_accounts(call):
+    try:
+        account_files = os.listdir(accounts_folder)
+        if account_files:
+            account_list = [file.replace(".txt", "") for file in account_files]
+            account_count = len(account_list)
+            accounts_text = "\n".join(account_list)
+            response_text = f"عدد الحسابات: {account_count}\n\nالحسابات:\n{accounts_text}"
+        else:
+            response_text = "لا توجد حسابات مخزنة."
+        
+        await bot.edit_message_text(
+            chat_id=call.message.chat.id, 
+            message_id=call.message.id, 
+            text=response_text
+        )
+    except FileNotFoundError:
+        await bot.edit_message_text(
+            chat_id=call.message.chat.id, 
+            message_id=call.message.id, 
+            text="مجلد الحسابات غير موجود."
+        )
+
+# التعامل مع الأزرار
+@bot.on_callback_query()
+async def handle_callback_query(bot, call):
+    if call.data == "add":
+        await bot.edit_message_text(
+            chat_id=call.message.chat.id, 
+            message_id=call.message.id, 
+            text="📱 أرسل رقم الهاتف من فضلك:"
+        )
+
+        # ✅ بفضل pyromod.listen الآن البوت ينتظر الرسالة التالية
+        data = await bot.listen(chat_id=call.from_user.id, filters=filters.text & filters.private)
+        phone_number = data.text.strip()
+
+        await bot.send_message(chat_id=call.message.chat.id, text=f"📞 جاري إرسال كود التحقق للرقم {phone_number}...")
+
+        # إنشاء جلسة جديدة
+        session_connect = Client(phone_number, api_id=apid, api_hash=hash)
+
+        try:
+            await session_connect.connect()
+            code_data = await session_connect.send_code(phone_number=phone_number)
+        except PhoneNumberInvalid:
+            await bot.send_message(chat_id=call.message.chat.id, text="❌ الرقم غير صالح")
+            await session_connect.disconnect()
+            return
+
+        # طلب الكود من المستخدم
+        await bot.send_message(chat_id=call.message.chat.id, text="📩 أرسل الكود الذي وصلك من تيليجرام:")
+
+        data = await bot.listen(chat_id=call.from_user.id, filters=filters.text & filters.private)
+        try:
+            VerCode = int(data.text.strip())
+        except ValueError:
+            await bot.send_message(chat_id=call.message.chat.id, text="❌ الكود غير صالح")
+            await session_connect.disconnect()
+            return
+
+        try:
+            # تسجيل الدخول
+            await session_connect.sign_in(
+                phone_code=str(VerCode), 
+                phone_code_hash=code_data.phone_code_hash, 
+                phone_number=phone_number
+            )
+
+            # جلب معلومات الحساب
+            user = await session_connect.get_me()
+            username = user.username if user.username else "لا يوجد يوزر"
+            full_name = user.first_name + " " + (user.last_name if user.last_name else "")
+            session_string = await session_connect.export_session_string()
+
+            # حفظ الجلسة
+            session_file_path = os.path.join(accounts_folder, f"{phone_number}.txt")
+            with open(session_file_path, "w") as f:
+                f.write(f"{phone_number}\n{session_string}\n")
+                f.write(f"User - {username}\n")
+                f.write(f"Name - {full_name}\n")
+
+            await bot.send_message(chat_id=call.message.chat.id, text="✅ تم تسجيل الدخول بنجاح وحفظ الحساب")
+        except (PhoneCodeExpired, PhoneCodeInvalid):
+            await bot.send_message(chat_id=call.message.chat.id, text="❌ الكود خطأ أو انتهت صلاحيته.")
+            await session_connect.disconnect()
+            return
+        except SessionPasswordNeeded:
+            # التحقق بخطوتين
+            await bot.send_message(chat_id=call.message.chat.id, text="🔐 الحساب محمي برمز تحقق بخطوتين.\nأرسل كلمة السر:")
+            data = await bot.listen(chat_id=call.from_user.id, filters=filters.text & filters.private)
+            password = data.text.strip()
+
+            try:
+                await session_connect.check_password(password)
+
+                user = await session_connect.get_me()
+                username = user.username if user.username else "لا يوجد يوزر"
+                full_name = user.first_name + " " + (user.last_name if user.last_name else "")
+                session_string = await session_connect.export_session_string()
+
+                session_file_path = os.path.join(accounts_folder, f"{phone_number}.txt")
+                with open(session_file_path, "w") as f:
+                    f.write(f"{phone_number}\n{session_string}\n")
+                    f.write(f"User - {username}\n")
+                    f.write(f"Name - {full_name}\n")
+
+                await bot.send_message(chat_id=call.message.chat.id, text="✅ تم تسجيل الدخول بنجاح وحفظ الحساب")
+            except PasswordHashInvalid:
+                await bot.send_message(chat_id=call.message.chat.id, text="❌ كلمة السر خطأ")
+                await session_connect.disconnect()
+                return
+
+    elif call.data == "show":
+        await show_accounts(call)
+
+    elif call.data == "delet":
+        await bot.send_message(chat_id=call.message.chat.id, text="🗑️ أرسل رقم الهاتف المراد حذفه:")
+        data = await bot.listen(chat_id=call.from_user.id, filters=filters.text & filters.private)
+        phone_number = data.text.strip()
+
+        session_path = os.path.join(accounts_folder, f"{phone_number}.txt")
+        if os.path.exists(session_path):
+            os.remove(session_path)
+            await bot.send_message(chat_id=call.message.chat.id, text="✅ تم حذف الحساب")
+        else:
+            await bot.send_message(chat_id=call.message.chat.id, text="❌ لا يوجد حساب بهذا الرقم")
+
+# تشغيل البوت
+bot.run()
